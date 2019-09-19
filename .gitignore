@@ -1,2 +1,3 @@
 *.ini
 pytorchbridge.egg-info
+__pycache__/
