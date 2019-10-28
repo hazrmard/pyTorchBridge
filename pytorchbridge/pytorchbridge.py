@@ -9,18 +9,21 @@ from sklearn.base import BaseEstimator
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm.auto import trange, tqdm
+from tqdm.auto import trange
 
 
 
 class TorchEstimator(BaseEstimator):
     """
     Wraps a `torch.nn.Module` instance with a scikit-learn `Estimator` API.
+
+    Note:
+    * All parameters in the provided module must have the same data type and device.
     """
 
     def __init__(self, module: nn.Module=None,
                  optimizer: optim.Optimizer=None,
-                 loss: nn.modules.loss._Loss=None, epochs: int=10, verbose=False,
+                 loss: nn.modules.loss._Loss=None, epochs: int=2, verbose=False,
                  batch_size: int=8, cuda=True):
         """        
         Keyword Arguments:
@@ -69,7 +72,7 @@ class TorchEstimator(BaseEstimator):
                 def __init__(self):
                     super().__init__()
                     self.linear = nn.Linear(infeatures, outfeatures)
-                    self.squeeze = len(torch.as_tensor(y).size()) == 1
+                    self.squeeze = y.ndim == 1
 
                 def forward(self, x):
                     x = self.linear(x)
@@ -83,6 +86,8 @@ class TorchEstimator(BaseEstimator):
             self._device = next(self.module.parameters()).device
         
         self._dtype = next(self.module.parameters()).dtype
+        self._batch_first = any(map(lambda x: getattr(x, 'batch_first', True),
+                                                      self.module.modules()))
 
         if self.optimizer is None:
             self.optimizer = optim.SGD(self.module.parameters(), lr=0.1)
@@ -104,14 +109,13 @@ class TorchEstimator(BaseEstimator):
         Returns:
         self
         """
+        # TODO: Add instance weights to super-/sub-sample training data.
         # pylint: disable=no-member
         self._init(X, y)
 
         if self.verbose:
             print()
-        ranger = trange(self.epochs)
-
-        self._batch_first = self._is_batch_first()
+        ranger = trange(self.epochs, leave=False)
         for e in ranger:
             total_loss = 0.
 
@@ -147,12 +151,14 @@ class TorchEstimator(BaseEstimator):
         X = torch.as_tensor(X, dtype=self._dtype, device=self._device)
         with torch.no_grad():
             result = self.module(X, **kwargs)
+            if isinstance(result, tuple):
+                result = result[0]    # recurrent layers return (output, hidden)
         if is_numpy:
-            return result.numpy()
+            return result.cpu().numpy()
         return result
 
 
-    def score(self, X, y) -> float:
+    def score(self, X, y, **kwargs) -> float:
         """
         Measure how well the estimator learned through the coefficient of
         determination.
@@ -162,6 +168,7 @@ class TorchEstimator(BaseEstimator):
             for recurrent modules or (N, Features) for other modules.
         y {torch.Tensor} -- `Tensor` of shape ([SeqLen,] N, OutputFeatures) for recurrent
             modules of (N, OutputFeatures).
+        **kwargs -- Keyword arguments passed to `self.module(X, **kwargs)`
 
         Returns:
         float -- Coefficient of determination.
@@ -169,7 +176,7 @@ class TorchEstimator(BaseEstimator):
         # pylint: disable=no-member
         X = torch.as_tensor(X, dtype=self._dtype, device=self._device)
         y = torch.as_tensor(y, dtype=self._dtype, device=self._device)
-        y_pred = self.predict(X)
+        y_pred = self.predict(X, **kwargs)
         residual_squares_sum = ((y - y_pred) ** 2).sum()
         total_squares_sum = ((y - y.mean()) ** 2).sum()
         return (1 - residual_squares_sum / total_squares_sum).item()
@@ -184,7 +191,7 @@ class TorchEstimator(BaseEstimator):
         if isinstance(X, np.ndarray):
             X = X.astype(float)
         X = torch.as_tensor(X, dtype=self._dtype)
-        if not self._batch_first:
+        if not self._batch_first and X.ndim > 2:
             # Recurrent layers take inputs of the shape (SeqLen, N, Features...)
             # So if there is any recurrent layer in the module, assume that this
             # is the expected input shape
@@ -199,22 +206,6 @@ class TorchEstimator(BaseEstimator):
             nbatches = N // self.batch_size + (1 if N % self.batch_size else 0)
             for i in range(nbatches):
                 yield X[i*self.batch_size:(i+1)*self.batch_size]
-
-
-    def _is_recurrent(self) -> bool:
-        """
-        Checks whether the network has any recurrent units.
-        """
-        return any(map(lambda x: isinstance(x, nn.RNNBase), self.module.modules()))
-
-
-    def _is_batch_first(self) -> bool:
-        """
-        Checks whether the features arrays are in the shape (Batch, ..., Features) or
-        (..., Batch, Features).
-        """
-        # Default setting is batch_first=False for RNNBase subclasses
-        return any(map(lambda x: getattr(x, 'batch_first', True), self.module.modules()))
 
 
     def _get_shape(self, t: torch.Tensor) -> Tuple[int, int, int]:
@@ -241,7 +232,8 @@ class TorchEstimator(BaseEstimator):
         if ndims == 2:
             return 0, sz[0], sz[1]
         elif ndims == 3:
-            if self._is_batch_first():
+            if self._batch_first:
                 return sz[1], sz[0], sz[2]
             else:
                 return sz[0], sz[1], sz[2]
+
