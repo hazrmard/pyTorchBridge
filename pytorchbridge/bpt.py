@@ -18,7 +18,7 @@ class RecurrentTorchEstimator(TorchEstimator):
     def __init__(self, module: nn.Module=None,
                  optimizer: optim.Optimizer=None,
                  loss: nn.modules.loss._Loss=None, epochs: int=2, verbose=False,
-                 batch_size: int=8, cuda=True,
+                 batch_size: int=8, cuda=True, return_hidden: bool=False,
                  bpt_every: int=None, bpt_for: int=None):
         """        
         Keyword Arguments:
@@ -38,7 +38,8 @@ class RecurrentTorchEstimator(TorchEstimator):
             epochs=epochs,
             verbose=verbose,
             batch_size=batch_size,
-            cuda=cuda
+            cuda=cuda,
+            return_hidden=return_hidden
         )
         
         self.bpt_every = bpt_every
