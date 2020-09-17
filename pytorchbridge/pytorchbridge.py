@@ -9,7 +9,13 @@ from sklearn.base import BaseEstimator
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader
 from tqdm.auto import trange
+
+
+
+# Defining custom types
+TensorLike = Union[torch.Tensor, np.ndarray]
 
 
 
@@ -17,8 +23,10 @@ class TorchEstimator(BaseEstimator):
     """
     Wraps a `torch.nn.Module` instance with a scikit-learn `Estimator` API.
 
-    Note:
-    * All parameters in the provided module must have the same data type and device.
+    *Note:*
+        All parameters in the provided module must have the same data type and
+        device. The `_init()` method uses the dtype/device of the first element
+        in `module.parameters()` to set default casting options.
     """
 
     def __init__(self, module: nn.Module=None,
@@ -78,7 +86,7 @@ class TorchEstimator(BaseEstimator):
 
 
 
-    def _init(self, X, y):
+    def _init(self, X: TensorLike, y: TensorLike):
         """
         Initializes internal parameters before fitting, including device, data
         types for network parameters.
@@ -123,11 +131,20 @@ class TorchEstimator(BaseEstimator):
             self.loss = nn.MSELoss()
 
 
-    def parameters(self):
+    def parameters(self) -> Iterator[torch.Tensor]:
+        """
+        Convenience method for `self.module.parameters()`.
+
+        Returns
+        -------
+        Iterator
+            Iterator over a module's parameters.
+        """        
         return self.module.parameters()
 
 
-    def fit(self, X: torch.Tensor, y: torch.Tensor, **kwargs) -> 'TorchEstimator':
+    def fit(self, X: Union[TensorLike, DataLoader], y: TensorLike=None, \
+            **kwargs) -> 'TorchEstimator':
         """
         Fit target to features.
 
@@ -135,7 +152,8 @@ class TorchEstimator(BaseEstimator):
         X {torch.Tensor} -- `Tensor` of shape (SeqLen, N, Features) or (N, SeqLen, Features)
             for recurrent modules or (N, Features) for other modules.
         y {torch.Tensor} -- `Tensor` of shape ([SeqLen,] N, OutputFeatures) for recurrent
-            modules of (N, OutputFeatures).
+            modules of (N, OutputFeatures). Optional if X is a `DataLoader` which
+            already contains features and targets.
         **kwargs -- Keyword arguments passed to `self.module(X, **kwargs)`
 
         Returns:
@@ -151,7 +169,7 @@ class TorchEstimator(BaseEstimator):
                 vidx = np.random.choice(len(X),
                                         size=int(self.validation_fraction * len(X)))
                 Xval, yval = X[vidx], y[vidx]
-                idx = np.asarray(set(range(len(X))) - set(vidx), dtype=int)
+                idx = np.asarray(list(set(range(len(X))) - set(vidx)), dtype=int)
                 X, y = X[idx], y[idx]
 
             else:
@@ -170,18 +188,14 @@ class TorchEstimator(BaseEstimator):
         for e in ranger:
             total_loss = 0.
 
-            for instance, target in zip(self._to_batches(X), self._to_batches(y)):
+            if isinstance(X, DataLoader):
+                iterable = X
+            else:
+                iterable = zip(self._to_batches(X), self._to_batches(y))
+
+            for instance, target in iterable:
                 instance, target = instance.to(self._device), target.to(self._device)
-                self.module.zero_grad()
-                output = self.module(instance, **kwargs)
-                # For recurrent networks, the outputs may also return
-                # a tuple of hidden states/cell states
-                if isinstance(output, tuple):
-                    output, _ = output
-                loss = self.loss(output, target)
-                loss.backward()
-                self.optimizer.step()
-                total_loss += loss.item()
+                total_loss += self.partial_fit(instance, target, **kwargs)
 
             if self.verbose:
                 ranger.write(f'Epoch {e+1:3d}\tLoss: {total_loss:10.2f}')
@@ -204,18 +218,53 @@ class TorchEstimator(BaseEstimator):
         return self
 
 
-    def predict(self, X: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    def partial_fit(self, X: torch.Tensor, y: torch.Tensor, **kwargs) -> float:
+        """
+        Fit a single batch of tensors to the module. No type/device checking is
+        done.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            A tensor containing features.
+        y : torch.Tensor
+            A tensor containing targets.
+
+        Returns
+        -------
+        float
+            The loss of the targets and module outputs.
+        """        
+        self.module.zero_grad()
+        output = self.module(X, **kwargs)
+        # For recurrent networks, the outputs may also return
+        # a tuple of hidden states/cell states
+        if isinstance(output, tuple):
+            output, _ = output
+        loss = self.loss(output, y)
+        loss.backward()
+        self.optimizer.step()
+        return loss.item()
+
+
+    def predict(self, X: TensorLike, *args, **kwargs) -> torch.Tensor: 
         """
         Predict output from inputs.
 
-        Arguments:
-        X {torch.Tensor} -- `Tensor` of shape (SeqLen, N, Features) or (N, SeqLen, Features)
+        Parameters
+        ----------
+        X : torch.Tensor
+            Tensor` of shape (SeqLen, N, Features) or (N, SeqLen, Features)
             for recurrent modules or (N, Features) for other modules.
-        *args -- positional arguments passed  to `self.module(X, *args, **kwargs)`
-        **kwargs -- Keyword arguments passed to `self.module(X, *args, **kwargs)`
+        *args
+            Positional arguments passed  to `self.module(X, *args, **kwargs)`
+        **kwargs
+            Keyword arguments passed to `self.module(X, *args, **kwargs)`
 
-        Returns:
-        torch.Tensor -- of shape ([SeqLen,] N, OutputFeatures) for recurrent
+        Returns
+        -------
+        torch.Tensor
+            Of shape ([SeqLen,] N, OutputFeatures) for recurrent
             modules of (N, OutputFeatures).
         """
         # pylint: disable=no-member
@@ -227,6 +276,7 @@ class TorchEstimator(BaseEstimator):
                 result = result[0]    # recurrent layers return (output, hidden)
 
         if is_numpy:
+            # TODO: Iterate over arbitrarily nested tuples of returned tensors
             if isinstance(result, tuple):       # If hidden units are returned
                 h = result[0].cpu().numpy()
                 if isinstance(result[1], tuple):# LSTM case
@@ -241,7 +291,7 @@ class TorchEstimator(BaseEstimator):
         return result
 
 
-    def score(self, X, y, **kwargs) -> float:
+    def score(self, X: TensorLike, y: TensorLike, **kwargs) -> float:
         """
         Measure how well the estimator learned through the coefficient of
         determination.
@@ -265,7 +315,7 @@ class TorchEstimator(BaseEstimator):
         return (1 - residual_squares_sum / total_squares_sum).item()
 
 
-    def _to_batches(self, X: torch.Tensor) -> Iterator[torch.Tensor]:
+    def _to_batches(self, X: TensorLike) -> Iterator[torch.Tensor]:
         """
         Convert ([SeqLen,] N, Features) to a generator of ([SeqLen,] n, Features)
         mini-batches. So for recurrent layers, training can be done in batches.
@@ -291,7 +341,7 @@ class TorchEstimator(BaseEstimator):
                 yield X[i*self.batch_size:(i+1)*self.batch_size]
 
 
-    def _get_shape(self, t: torch.Tensor) -> Tuple[int, int, int]:
+    def _get_shape(self, t: TensorLike) -> Tuple[int, int, int]:
         """
         Get size of each dimension of tensor depending on `batch_first`. The
         size is returned in order of time, batch, features.

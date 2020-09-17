@@ -85,44 +85,44 @@ class RecurrentTorchEstimator(TorchEstimator):
             self.loss = nn.MSELoss()
 
 
-    def fit(self, X, y, **kwargs):
-        # pylint: disable=no-member
-        self._init(X, y)
+    def partial_fit(self, X: torch.Tensor, y: torch.Tensor, **kwargs) -> float:
+        """
+        Fit a single batch of tensors to the module. No type/device checking is
+        done.
 
-        if self.verbose:
-            print()
-        ranger = trange(self.epochs, leave=False)
-        for e in ranger:
-            total_loss = 0.
+        Parameters
+        ----------
+        X : torch.Tensor
+            A tensor containing features.
+        y : torch.Tensor
+            A tensor containing targets.
 
-            for instance, target in zip(self._to_batches(X), self._to_batches(y)):
-                instance, target = instance.to(self._device), target.to(self._device)
+        Returns
+        -------
+        float
+            The loss of the targets and module outputs.
+        """
+        hidden_shape = list(y.shape)
+        del hidden_shape[self._time_dim]
+        post_hidden = X.new_zeros(hidden_shape)      # batch, feature
 
-                hidden_shape = list(target.shape)
-                del hidden_shape[self._time_dim]
-                post_hidden = instance.new_zeros(hidden_shape)      # batch, feature
+        for t in range(0, self._get_shape(X)[0], self.bpt_every):
+            pre_in = self._slice_time(X, t, t + self.bpt_every - self.bpt_for)
+            post_in = self._slice_time(X, t + self.bpt_every - self.bpt_for, t + self.bpt_every)
+            sub_target = self._slice_time(y, t, t + self.bpt_every)
+            if post_in.shape[self._time_dim] < self.bpt_for: break
 
-                for t in range(0, self._get_shape(instance)[0], self.bpt_every):
-                    pre_in = self._slice_time(instance, t, t + self.bpt_every - self.bpt_for)
-                    post_in = self._slice_time(instance, t + self.bpt_every - self.bpt_for, t + self.bpt_every)
-                    sub_target = self._slice_time(target, t, t + self.bpt_every)
-                    if post_in.shape[self._time_dim] < self.bpt_for: break
-
-                    pre_out, pre_hidden = self.module(pre_in, post_hidden, **kwargs)
-                    pre_hidden = pre_hidden.detach()
-                    post_out, post_hidden = self.module(post_in, pre_hidden, **kwargs)
-                    post_hidden = post_hidden.detach()
-
-                    sub_output = torch.cat((pre_out, post_out), dim=self._time_dim)
-                    self.module.zero_grad()
-                    loss = self.loss(sub_output, sub_target)
-                    loss.backward()
-                    self.optimizer.step()
-                    total_loss += loss.item()
-
-            if self.verbose:
-                ranger.write(f'Epoch {e+1:3d}\tLoss: {total_loss:10.2f}')
-        return self
+            pre_out, pre_hidden = self.module(pre_in, post_hidden, **kwargs)
+            pre_hidden = pre_hidden.detach()
+            post_out, post_hidden = self.module(post_in, pre_hidden, **kwargs)
+            post_hidden = post_hidden.detach()
+            # pylint: disable=no-member
+            sub_output = torch.cat((pre_out, post_out), dim=self._time_dim)
+            self.module.zero_grad()
+            loss = self.loss(sub_output, sub_target)
+            loss.backward()
+            self.optimizer.step()
+            return loss.item()
 
 
     def _slice_time(self, t: torch.Tensor, start: int=None, stop: int=None) \

@@ -17,7 +17,32 @@ class TestAPI(TestCase):
     #     check_estimator(TorchEstimator())
 
 
-    def test_numpy_arrays(self):
+    def create_arrays(self, recurrent=False, batch_first=True, tensor=True):
+        t, n, fin, fout = 1, 10, 2, 1      # time, batch, features
+        if recurrent:
+            if batch_first:
+                X = np.random.rand(n, t, fin)
+                y = np.random.rand(n, fout)
+            else:
+                X = np.random.rand(t, n, fin)
+                y = np.random.rand(n, fout)
+        else:
+            X = np.random.rand(n, fin)
+            y = np.random.rand(n, fout)
+        if tensor:
+            X = torch.as_tensor(X)
+            y = torch.as_tensor(y)
+        return X, y
+
+
+    def test_numpy_dense(self):
+        X = np.random.rand(10, 2)
+        y = np.random.rand(10)
+        est = TorchEstimator()
+        est.fit(X, y).predict(X)
+
+
+    def test_numpy_recurrent(self):
         X = np.random.rand(10, 2)
         y = np.random.rand(10)
         est = TorchEstimator()
